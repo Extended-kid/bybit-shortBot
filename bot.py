@@ -145,14 +145,15 @@ class ShortBot:
         
         # Для свечей
         self.last_bar_close = 0
+        self._last_stall_check = 0
         
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         
         logger.info("=" * 60)
-        logger.info("🚀 БОТ ЗАПУЩЕН")
-        logger.info(f"📊 Начальный баланс: ${self.initial_balance:.2f}")
-        logger.info(f"⚙️ Параметры: pump={self.config.pump_threshold*100}%, tp={self.config.tp_percent*100}%, stall={self.config.stall_bars}")
+        logger.info("БОТ ЗАПУЩЕН")
+        logger.info(f"Начальный баланс: ${self.initial_balance:.2f}")
+        logger.info(f"Параметры: pump={self.config.pump_threshold*100}%, tp={self.config.tp_percent*100}%, stall={self.config.stall_bars}")
         logger.info("=" * 60)
     
     def get_balance(self) -> float:
@@ -184,14 +185,46 @@ class ShortBot:
             logger.error(f"Ошибка получения тикеров: {e}")
             return []
     
-    def get_klines(self, symbol: str) -> Optional[List]:
-        """Получить последние свечи"""
-        try:
-            response = self.client.get_klines(symbol, self.config.timeframe, limit=5)
-            return response["result"]["list"]
-        except Exception as e:
-            logger.error(f"Ошибка получения свечей для {symbol}: {e}")
-            return None
+    def get_klines(self, symbol: str, max_retries: int = 3) -> Optional[List]:
+        """
+        Получить свечи с exponential backoff при rate limit
+        """
+        for attempt in range(max_retries):
+            try:
+                # Ждем между запросами к разным символам
+                time.sleep(0.2)  # 200ms между разными монетами
+                
+                response = self.client.session.get_kline(
+                    category="linear",
+                    symbol=symbol,
+                    interval="15",
+                    limit=5
+                )
+                
+                # Проверяем rate limit в заголовках
+                self.client.wait_if_needed()
+                
+                if response.get("retCode") == 10006:  # Rate limit
+                    wait_time = (attempt + 1) * 2  # 2, 4, 6 секунд
+                    logger.warning(f"Rate limit для {symbol}, ждем {wait_time}с (попытка {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                    
+                if response.get("retCode") != 0:
+                    logger.error(f"Ошибка API для {symbol}: {response.get('retMsg')}")
+                    return None
+                    
+                return response["result"]["list"]
+                
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Не удалось получить свечи для {symbol} после {max_retries} попыток: {e}")
+                    return None
+                wait_time = (attempt + 1) * 2
+                logger.warning(f"Ошибка получения свечей {symbol}, повтор через {wait_time}с: {e}")
+                time.sleep(wait_time)
+        
+        return None
     
     def check_pump_candidate(self, ticker: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Проверить, является ли монета кандидатом на памп"""
@@ -274,21 +307,25 @@ class ShortBot:
                 "entry_price": cand["last"]
             }
             added += 1
-            logger.info(f"📋 Добавлен в watchlist: {symbol} (памп {cand['pump_pct']:.1f}%)")
+            logger.info(f"Добавлен в watchlist: {symbol} (памп {cand['pump_pct']:.1f}%)")
         
         if added:
             self.tracker.save()
-            logger.info(f"➕ Добавлено {added} новых монет в watchlist")
+            logger.info(f"Добавлено {added} новых монет в watchlist")
     
     def check_stall(self) -> List[Tuple[str, Dict[str, Any]]]:
         """Проверить stall условия и вернуть готовые к входу"""
+        if time.time() - self._last_stall_check < 2:  # Минимум 2 секунды между проверками
+            return []
+        
+        self._last_stall_check = time.time()
         ready = []
         now = int(time.time())
         
         for symbol, data in list(self.tracker.watchlist.items()):
             # Проверяем TTL
             if now - data.get("created_ts", now) > self.config.watch_ttl_hours * 3600:
-                logger.info(f"⌛ Удален из watchlist (TTL): {symbol}")
+                logger.info(f"Удален из watchlist (TTL): {symbol}")
                 del self.tracker.watchlist[symbol]
                 continue
             
@@ -311,7 +348,7 @@ class ShortBot:
                 data["local_high"] = high
                 data["stall"] = 0
                 data["blocked"] = False
-                logger.info(f"📈 Новый локальный максимум для {symbol}: {high:.6f}")
+                logger.info(f"Новый локальный максимум для {symbol}: {high:.6f}")
             else:
                 data["stall"] = stall + 1
             
@@ -323,7 +360,7 @@ class ShortBot:
                 tp_price = local_high * (1 - self.config.tp_percent)
                 if close <= tp_price:
                     data["blocked"] = True
-                    logger.info(f"⏭️ {symbol}: цена уже ниже TP ({close:.6f} <= {tp_price:.6f}), блокируем")
+                    logger.info(f"⏭ {symbol}: цена уже ниже TP ({close:.6f} <= {tp_price:.6f}), блокируем")
                 else:
                     ready.append((symbol, data))
         
@@ -432,7 +469,7 @@ class ShortBot:
             del self.tracker.watchlist[symbol]
             self.tracker.save()
             
-            logger.info(f"✅ ОТКРЫТА ПОЗИЦИЯ {symbol}")
+            logger.info(f"ОТКРЫТА ПОЗИЦИЯ {symbol}")
             logger.info(f"   Вход: ${current_price:.6f}")
             logger.info(f"   TP: ${tp_price:.6f} ({(tp_price/current_price-1)*100:.1f}%)")
             logger.info(f"   SL: ${sl_price:.6f} ({self.config.sl_multiplier}x)")
@@ -508,7 +545,7 @@ class ShortBot:
                 reason, duration_str
             )
             
-            logger.info(f"{'🟢' if pnl_usdt > 0 else '🔴'} ЗАКРЫТА {symbol}")
+            logger.info(f"{'' if pnl_usdt > 0 else ''} ЗАКРЫТА {symbol}")
             logger.info(f"   Причина: {reason}")
             logger.info(f"   Вход: ${entry:.6f} -> Выход: ${price:.6f}")
             logger.info(f"   PnL: ${pnl_usdt:.2f} ({pnl_percent:.1f}%)")
@@ -518,7 +555,7 @@ class ShortBot:
     
     def run(self):
         """Основной цикл бота"""
-        logger.info("🔄 Запуск основного цикла")
+        logger.info("Запуск основного цикла")
         
         while self.running:
             try:
@@ -527,7 +564,7 @@ class ShortBot:
                 
                 if current_bar != self.last_bar_close:
                     self.last_bar_close = current_bar
-                    logger.info(f"🕐 Новая свеча: {datetime.fromtimestamp(current_bar)}")
+                    logger.info(f"Новая свеча: {datetime.fromtimestamp(current_bar)}")
                     
                     # Получаем все тикеры
                     tickers = self.get_all_tickers()
@@ -540,13 +577,13 @@ class ShortBot:
                             candidates.append(cand)
                     
                     if candidates:
-                        logger.info(f"🔍 Найдено кандидатов: {len(candidates)}")
+                        logger.info(f"Найдено кандидатов: {len(candidates)}")
                         self.update_watchlist(candidates)
                     
                     # Проверяем stall условия
                     ready = self.check_stall()
                     if ready:
-                        logger.info(f"⚡ Готовы к входу: {len(ready)}")
+                        logger.info(f"Готовы к входу: {len(ready)}")
                         for symbol, data in ready:
                             self.open_position(symbol, data)
                     
@@ -554,7 +591,7 @@ class ShortBot:
                     self.check_positions()
                     
                     # Показываем статистику
-                    logger.info(f"📊 Статистика: watchlist={len(self.tracker.watchlist)}, "
+                    logger.info(f"Статистика: watchlist={len(self.tracker.watchlist)}, "
                               f"positions={len(self.tracker.positions)}, "
                               f"balance=${self.risk_manager.current_capital:.2f}")
                 
@@ -566,7 +603,7 @@ class ShortBot:
                 logger.error(f"Ошибка в основном цикле: {e}", exc_info=True)
                 time.sleep(10)
         
-        logger.info("👋 Бот остановлен")
+        logger.info("Бот остановлен")
 
 
 def main():

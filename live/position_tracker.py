@@ -27,6 +27,7 @@ class PositionTracker:
                 logger.error(f"Error loading state: {e}")
     
     def save(self):
+        """Сохранить состояние в файл"""
         data = {
             'positions': self.positions,
             'cooldowns': self.cooldowns,
@@ -34,9 +35,20 @@ class PositionTracker:
             'updated_at': int(time.time())
         }
         
+        # Сначала удаляем старый временный файл, если есть
         tmp_file = self.state_file.with_suffix('.tmp')
-        with open(tmp_file, 'w') as f:
+        if tmp_file.exists():
+            tmp_file.unlink()
+        
+        # Сохраняем во временный файл
+        with open(tmp_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
+        
+        # Удаляем основной файл, если существует
+        if self.state_file.exists():
+            self.state_file.unlink()
+        
+        # Переименовываем временный в основной
         tmp_file.rename(self.state_file)
     
     def add_position(self, position: Dict[str, Any]):
