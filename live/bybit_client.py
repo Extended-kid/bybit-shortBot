@@ -8,14 +8,18 @@ logger = logging.getLogger(__name__)
 
 class BybitClient:
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
+        # Определяем базовый URL: если не указан, используем европейский по умолчанию
+        base_url = os.getenv("BYBIT_API_URL", "https://api.bybit.eu")
+        
         self.session = HTTP(
             testnet=testnet,
             api_key=api_key,
-            api_secret=api_secret
+            api_secret=api_secret,
+            base_url=base_url  # Эта строка критически важна!
         )
         self.rate_limit_remaining = 50
         self.rate_limit_reset = 0
-    
+        
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10)
