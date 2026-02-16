@@ -88,3 +88,11 @@ class BybitClient:
             if wait_time > 0:
                 logger.warning(f"Rate limit low, waiting {wait_time:.1f}s")
                 time.sleep(min(wait_time, 5))
+    
+    def get_wallet_balance(self, **kwargs) -> Dict[str, Any]:
+        """Получить баланс кошелька"""
+        response = self.session.get_wallet_balance(**kwargs)
+        if response.get("retCode") != 0:
+            raise RuntimeError(f"API Error: {response.get('retMsg')}")
+        self._update_rate_limits(response)
+        return response
