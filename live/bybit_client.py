@@ -11,20 +11,23 @@ class BybitClient:
     """Обертка для Bybit API с retry и обработкой ошибок"""
     
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
-        # Определяем базовый URL для API
-        # Для тестовой сети используем специальный URL
-        if testnet:
-            base_url = "https://api-testnet.bybit.com"
-        else:
-            # Для реальной торговли используем европейский endpoint по умолчанию
-            base_url = os.getenv("BYBIT_API_URL", "https://api.bybit.eu")
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.testnet = testnet
         
-        # Создаем сессию, передавая base_url напрямую
-        self.session = HTTP(
-            testnet=testnet,  # Оставляем для обратной совместимости
+        # Публичная сессия (без ключей) - для получения данных
+        if testnet:
+            public_base_url = "https://api-testnet.bybit.com"
+        else:
+            public_base_url = os.getenv("BYBIT_API_URL", "https://api.bybit.eu")
+        
+        self.public_session = HTTP(testnet=testnet, base_url=public_base_url)
+        
+        # Авторизованная сессия (с ключами) - для торговли
+        self.trading_session = HTTP(
+            testnet=testnet,
             api_key=api_key,
-            api_secret=api_secret,
-            base_url=base_url  # Теперь параметр должен работать!
+            api_secret=api_secret
         )
         
         self.rate_limit_remaining = 50
@@ -35,12 +38,12 @@ class BybitClient:
         wait=wait_exponential(multiplier=1, min=1, max=10)
     )
     def get_instruments(self, symbol: Optional[str] = None) -> Dict[str, Any]:
-        """Получить информацию об инструменте с retry"""
+        """Получить информацию об инструменте (можно через публичную сессию)"""
         params = {"category": "linear"}
         if symbol:
             params["symbol"] = symbol
             
-        response = self.session.get_instruments_info(**params)
+        response = self.public_session.get_instruments_info(**params)
         
         if response.get("retCode") != 0:
             raise RuntimeError(f"API Error: {response.get('retMsg')}")
@@ -53,8 +56,8 @@ class BybitClient:
         wait=wait_exponential(multiplier=1, min=1, max=10)
     )
     def get_tickers(self) -> Dict[str, Any]:
-        """Получить все тикеры"""
-        response = self.session.get_tickers(category="linear")
+        """Получить все тикеры (публичная сессия)"""
+        response = self.public_session.get_tickers(category="linear")
         
         if response.get("retCode") != 0:
             raise RuntimeError(f"API Error: {response.get('retMsg')}")
@@ -67,8 +70,8 @@ class BybitClient:
         wait=wait_exponential(multiplier=1, min=1, max=10)
     )
     def get_klines(self, symbol: str, interval: str, limit: int = 5) -> Dict[str, Any]:
-        """Получить свечи"""
-        response = self.session.get_kline(
+        """Получить свечи (публичная сессия)"""
+        response = self.public_session.get_kline(
             category="linear",
             symbol=symbol,
             interval=interval,
@@ -80,6 +83,14 @@ class BybitClient:
             
         self._update_rate_limits(response)
         return response
+    
+    def place_order(self, **kwargs) -> Dict[str, Any]:
+        """Разместить ордер (только через авторизованную сессию)"""
+        return self.trading_session.place_order(**kwargs)
+    
+    def get_wallet_balance(self, **kwargs) -> Dict[str, Any]:
+        """Получить баланс (только через авторизованную сессию)"""
+        return self.trading_session.get_wallet_balance(**kwargs)
     
     def _update_rate_limits(self, response: Dict[str, Any]):
         """Обновить информацию о rate limits"""

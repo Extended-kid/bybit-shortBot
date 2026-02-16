@@ -22,10 +22,8 @@ from dotenv import load_dotenv
 # Загружаем .env
 load_dotenv()
 
-# Создаем папку для логов, если её нет
-import os
-log_dir = 'data/logs'
-os.makedirs(log_dir, exist_ok=True)
+# Создаем папку для логов
+os.makedirs('data/logs', exist_ok=True)
 
 # Настройка логирования
 logging.basicConfig(
@@ -45,8 +43,9 @@ from live.order_manager import OrderManager
 from live.position_tracker import PositionTracker
 from live.telegram_notifier import TelegramNotifier
 
+
 # =====================================
-# РИСК МЕНЕДЖЕР (из вашего файла)
+# РИСК МЕНЕДЖЕР
 # =====================================
 class RiskManager:
     """Управление рисками на основе истории монеты"""
@@ -164,7 +163,7 @@ class ShortBot:
     def get_balance(self) -> float:
         """Получить текущий баланс USDT"""
         try:
-            response = self.client.session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+            response = self.client.get_wallet_balance(accountType="UNIFIED", coin="USDT")
             if response.get("retCode") == 0:
                 balance = float(response["result"]["list"][0]["coin"][0]["walletBalance"])
                 return balance
@@ -197,21 +196,17 @@ class ShortBot:
         for attempt in range(max_retries):
             try:
                 # Ждем между запросами к разным символам
-                time.sleep(0.2)  # 200ms между разными монетами
+                time.sleep(0.2)
                 
-                response = self.client.session.get_kline(
-                    category="linear",
+                response = self.client.get_klines(
                     symbol=symbol,
                     interval="15",
                     limit=5
                 )
                 
-                # Проверяем rate limit в заголовках
-                self.client.wait_if_needed()
-                
                 if response.get("retCode") == 10006:  # Rate limit
-                    wait_time = (attempt + 1) * 2  # 2, 4, 6 секунд
-                    logger.warning(f"Rate limit для {symbol}, ждем {wait_time}с (попытка {attempt + 1}/{max_retries})")
+                    wait_time = (attempt + 1) * 2
+                    logger.warning(f"Rate limit для {symbol}, ждем {wait_time}с")
                     time.sleep(wait_time)
                     continue
                     
@@ -223,11 +218,9 @@ class ShortBot:
                 
             except Exception as e:
                 if attempt == max_retries - 1:
-                    logger.error(f"Не удалось получить свечи для {symbol} после {max_retries} попыток: {e}")
+                    logger.error(f"Не удалось получить свечи для {symbol}: {e}")
                     return None
-                wait_time = (attempt + 1) * 2
-                logger.warning(f"Ошибка получения свечей {symbol}, повтор через {wait_time}с: {e}")
-                time.sleep(wait_time)
+                time.sleep((attempt + 1) * 2)
         
         return None
     
@@ -299,8 +292,8 @@ class ShortBot:
                 continue
             
             # Берем последнюю закрытую свечу
-            last_candle = klines[-2]  # предпоследняя (последняя закрытая)
-            local_high = float(last_candle[2])  # high
+            last_candle = klines[-2]
+            local_high = float(last_candle[2])
             
             # Добавляем в watchlist
             self.tracker.watchlist[symbol] = {
@@ -320,7 +313,7 @@ class ShortBot:
     
     def check_stall(self) -> List[Tuple[str, Dict[str, Any]]]:
         """Проверить stall условия и вернуть готовые к входу"""
-        if time.time() - self._last_stall_check < 2:  # Минимум 2 секунды между проверками
+        if time.time() - self._last_stall_check < 2:
             return []
         
         self._last_stall_check = time.time()
@@ -412,8 +405,8 @@ class ShortBot:
                 logger.warning(f"{symbol}: сумма меньше минимальной, пропускаем")
                 return
             
-            # Открываем позицию (market sell)
-            response = self.client.session.place_order(
+            # Открываем позицию
+            response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
                 side="Sell",
@@ -441,30 +434,28 @@ class ShortBot:
             
             self.tracker.add_position(position)
             
-            # Выставляем TP и SL лимитниками
-            self.client.session.place_order(
+            # Выставляем TP и SL
+            self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
                 side="Buy",
                 orderType="Limit",
                 qty=str(qty),
                 price=str(tp_price),
-                timeInForce="GTC",
-                orderLinkId=f"tp_{int(time.time())}"
+                timeInForce="GTC"
             )
             
-            self.client.session.place_order(
+            self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
                 side="Buy",
                 orderType="Limit",
                 qty=str(qty),
                 price=str(sl_price),
-                timeInForce="GTC",
-                orderLinkId=f"sl_{int(time.time())}"
+                timeInForce="GTC"
             )
             
-            # Уведомление в Telegram
+            # Уведомление
             self.notifier.send_trade_open(
                 symbol, current_price, tp_price, sl_price,
                 position_usdt, multiplier
@@ -487,7 +478,6 @@ class ShortBot:
         """Проверить открытые позиции"""
         for symbol, position in list(self.tracker.positions.items()):
             try:
-                # Получаем текущую цену
                 tickers = self.get_all_tickers()
                 current_price = None
                 for t in tickers:
@@ -498,11 +488,8 @@ class ShortBot:
                 if not current_price:
                     continue
                 
-                # Проверяем TP
                 if current_price <= position["tp_price"]:
                     self.close_position(symbol, "TP", current_price)
-                
-                # Проверяем SL
                 elif current_price >= position["sl_price"]:
                     self.close_position(symbol, "SL", current_price)
                     
@@ -516,8 +503,7 @@ class ShortBot:
             if not position:
                 return
             
-            # Закрываем позицию (market buy)
-            response = self.client.session.place_order(
+            response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
                 side="Buy",
@@ -530,18 +516,13 @@ class ShortBot:
                 logger.error(f"Ошибка закрытия {symbol}: {response.get('retMsg')}")
                 return
             
-            # Рассчитываем PnL
             entry = position["entry_price"]
             pnl_usdt = (entry - price) * position["qty"]
             pnl_percent = (entry - price) / entry * 100
             
-            # Обновляем риск-менеджер
             self.risk_manager.on_trade_result(pnl_usdt, pnl_percent, symbol)
-            
-            # Удаляем позицию
             self.tracker.remove_position(symbol)
             
-            # Уведомление
             duration = int(time.time()) - position["open_time"]
             duration_str = f"{duration // 60}м {duration % 60}с"
             
@@ -564,17 +545,14 @@ class ShortBot:
         
         while self.running:
             try:
-                # Проверяем закрытие свечи
                 current_bar = self.get_current_bar_close()
                 
                 if current_bar != self.last_bar_close:
                     self.last_bar_close = current_bar
                     logger.info(f"Новая свеча: {datetime.fromtimestamp(current_bar)}")
                     
-                    # Получаем все тикеры
                     tickers = self.get_all_tickers()
                     
-                    # Ищем кандидатов на памп
                     candidates = []
                     for t in tickers:
                         cand = self.check_pump_candidate(t)
@@ -585,17 +563,14 @@ class ShortBot:
                         logger.info(f"Найдено кандидатов: {len(candidates)}")
                         self.update_watchlist(candidates)
                     
-                    # Проверяем stall условия
                     ready = self.check_stall()
                     if ready:
                         logger.info(f"Готовы к входу: {len(ready)}")
                         for symbol, data in ready:
                             self.open_position(symbol, data)
                     
-                    # Проверяем открытые позиции
                     self.check_positions()
                     
-                    # Показываем статистику
                     logger.info(f"Статистика: watchlist={len(self.tracker.watchlist)}, "
                               f"positions={len(self.tracker.positions)}, "
                               f"balance=${self.risk_manager.current_capital:.2f}")
