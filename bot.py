@@ -22,6 +22,11 @@ from dotenv import load_dotenv
 # Загружаем .env
 load_dotenv()
 
+# Создаем папку для логов, если её нет
+import os
+log_dir = 'data/logs'
+os.makedirs(log_dir, exist_ok=True)
+
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
