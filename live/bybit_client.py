@@ -1,4 +1,5 @@
 ﻿import time
+import os
 import logging
 from typing import Dict, Any, Optional
 from pybit.unified_trading import HTTP
