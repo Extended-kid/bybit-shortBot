@@ -1,6 +1,6 @@
-﻿import time
-import os
+﻿import os
 import logging
+import time
 from typing import Dict, Any, Optional
 from pybit.unified_trading import HTTP
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -8,24 +8,35 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 logger = logging.getLogger(__name__)
 
 class BybitClient:
+    """Обертка для Bybit API с retry и обработкой ошибок"""
+    
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
-        # Определяем базовый URL: если не указан, используем европейский по умолчанию
+        # Определяем базовый URL для API
         base_url = os.getenv("BYBIT_API_URL", "https://api.bybit.eu")
         
+        # Для тестовой сети используем специальный URL
+        if testnet:
+            base_url = "https://api-testnet.bybit.com"
+        
+        # Создаем сессию с правильными параметрами для pybit 5.14.0
         self.session = HTTP(
             testnet=testnet,
             api_key=api_key,
-            api_secret=api_secret,
-            base_url=base_url  # Эта строка критически важна!
+            api_secret=api_secret
         )
+        
+        # В этой версии pybit базовый URL устанавливается через атрибут
+        self.session._base_url = base_url
+        
         self.rate_limit_remaining = 50
         self.rate_limit_reset = 0
-        
+    
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10)
     )
     def get_instruments(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Получить информацию об инструменте с retry"""
         params = {"category": "linear"}
         if symbol:
             params["symbol"] = symbol
@@ -43,6 +54,7 @@ class BybitClient:
         wait=wait_exponential(multiplier=1, min=1, max=10)
     )
     def get_tickers(self) -> Dict[str, Any]:
+        """Получить все тикеры"""
         response = self.session.get_tickers(category="linear")
         
         if response.get("retCode") != 0:
@@ -56,6 +68,7 @@ class BybitClient:
         wait=wait_exponential(multiplier=1, min=1, max=10)
     )
     def get_klines(self, symbol: str, interval: str, limit: int = 5) -> Dict[str, Any]:
+        """Получить свечи"""
         response = self.session.get_kline(
             category="linear",
             symbol=symbol,
@@ -70,6 +83,7 @@ class BybitClient:
         return response
     
     def _update_rate_limits(self, response: Dict[str, Any]):
+        """Обновить информацию о rate limits"""
         headers = getattr(response, 'headers', {})
         remaining = headers.get('X-Bapi-Limit-Status', '50')
         reset = headers.get('X-Bapi-Limit-Reset-Timestamp', '0')
@@ -81,6 +95,7 @@ class BybitClient:
             pass
     
     def wait_if_needed(self):
+        """Подождать если близко rate limit"""
         if self.rate_limit_remaining < 5:
             wait_time = max(0, (self.rate_limit_reset / 1000) - time.time())
             if wait_time > 0:
