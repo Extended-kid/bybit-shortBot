@@ -96,3 +96,11 @@ class BybitClient:
             raise RuntimeError(f"API Error: {response.get('retMsg')}")
         self._update_rate_limits(response)
         return response
+    
+    def place_order(self, **kwargs) -> Dict[str, Any]:
+        """Разместить ордер"""
+        response = self.session.place_order(**kwargs)
+        if response.get("retCode") != 0:
+            raise RuntimeError(f"API Error: {response.get('retMsg')}")
+        self._update_rate_limits(response)
+        return response
