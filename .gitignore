@@ -1,0 +1,43 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Data
+data/
+*.db
+*.log
+*.json
+!data/.gitkeep
+
+# API Keys
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Docker
+*.pid
+docker-compose.override.yml
