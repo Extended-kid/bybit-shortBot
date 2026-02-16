@@ -12,21 +12,20 @@ class BybitClient:
     
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
         # Определяем базовый URL для API
-        base_url = os.getenv("BYBIT_API_URL", "https://api.bybit.eu")
-        
         # Для тестовой сети используем специальный URL
         if testnet:
             base_url = "https://api-testnet.bybit.com"
+        else:
+            # Для реальной торговли используем европейский endpoint по умолчанию
+            base_url = os.getenv("BYBIT_API_URL", "https://api.bybit.eu")
         
-        # Создаем сессию с правильными параметрами для pybit 5.14.0
+        # Создаем сессию, передавая base_url напрямую
         self.session = HTTP(
-            testnet=testnet,
+            testnet=testnet,  # Оставляем для обратной совместимости
             api_key=api_key,
-            api_secret=api_secret
+            api_secret=api_secret,
+            base_url=base_url  # Теперь параметр должен работать!
         )
-        
-        # В этой версии pybit базовый URL устанавливается через атрибут
-        self.session._base_url = base_url
         
         self.rate_limit_remaining = 50
         self.rate_limit_reset = 0
