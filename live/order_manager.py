@@ -25,15 +25,23 @@ class OrderManager:
         qty_step = filters['qty_step']
         min_notional = filters['min_notional']
         
+        # Базовое количество
         qty = notional / price
         
+        # Округление вниз до шага с учетом точности
         if qty_step > 0:
+            # Округляем до нужного количества знаков
+            precision = len(str(qty_step).split('.')[-1]) if '.' in str(qty_step) else 0
             qty = math.floor(qty / qty_step) * qty_step
+            qty = round(qty, precision)  # Добавляем явное округление
         
+        # Не меньше минимума
         qty = max(qty, min_qty)
         
+        # Проверка минимальной суммы
         if qty * price < min_notional:
             qty = math.ceil(min_notional / price / qty_step) * qty_step
+            qty = round(qty, precision)
         
         return qty
     
