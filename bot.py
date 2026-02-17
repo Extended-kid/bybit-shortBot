@@ -476,14 +476,17 @@ class ShortBot:
             self.cancel_all_orders_for_symbol(symbol)
             
             # TP ордер
+            # TP ордер (Buy Limit - закрытие шорта при падении)
+            logger.info(f"Выставляем TP для {symbol} по цене {tp_price}")
             tp_response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
-                side="Buy",
+                side="Buy",  # 👈 TP для шорта = Buy
                 orderType="Limit",
                 qty=str(qty),
                 price=str(tp_price),
-                timeInForce="GTC"
+                timeInForce="GTC",
+                reduceOnly=True  # 👈 ДОБАВИТЬ (важно для TP/SL)
             )
             
             if tp_response.get("retCode") != 0:
@@ -491,15 +494,17 @@ class ShortBot:
             else:
                 logger.info(f"TP ордер для {symbol} выставлен по цене {tp_price}")
             
-            # SL ордер
+            # SL ордер (Buy Limit - закрытие шорта при росте)
+            logger.info(f"Выставляем SL для {symbol} по цене {sl_price}")
             sl_response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
-                side="Buy",
+                side="Buy",  # 👈 SL для шорта = Buy
                 orderType="Limit",
                 qty=str(qty),
                 price=str(sl_price),
-                timeInForce="GTC"
+                timeInForce="GTC",
+                reduceOnly=True  # 👈 ДОБАВИТЬ (важно для TP/SL)
             )
             
             if sl_response.get("retCode") != 0:
