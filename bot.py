@@ -401,7 +401,23 @@ class ShortBot:
     def open_position(self, symbol: str, data: Dict[str, Any]):
         """Открыть короткую позицию"""
         try:
-            # Получаем текущую цену
+            # ===== 1. ПРОВЕРКИ =====
+            if symbol in self.tracker.positions:
+                logger.warning(f"⛔ Уже есть позиция по {symbol}, пропускаем")
+                return
+            
+            # Проверяем баланс
+            balance = self.client.get_balance()
+            available = float(balance['USDT']['availableBalance'])
+            position_usdt = self.config.base_risk_per_trade * self.risk_manager.current_capital
+            multiplier = self.risk_manager.get_position_multiplier(symbol)
+            position_usdt *= multiplier
+            
+            if available < position_usdt * 1.1:  # +10% на комиссии
+                logger.error(f"❌ Недостаточно баланса: {available:.2f} < {position_usdt:.2f}")
+                return
+            
+            # ===== 2. ПОЛУЧАЕМ ЦЕНУ =====
             tickers = self.get_all_tickers()
             current_price = None
             for t in tickers:
@@ -410,39 +426,40 @@ class ShortBot:
                     break
             
             if not current_price:
-                logger.error(f"Не удалось получить цену для {symbol}")
+                logger.error(f"❌ Не удалось получить цену для {symbol}")
                 return
             
-            # Получаем информацию об инструменте
+            # ===== 3. РАСЧЕТ КОЛИЧЕСТВА =====
             instr = self.client.get_instruments(symbol)
             filters = OrderManager.extract_filters(instr)
             
-            # Рассчитываем размер позиции через RiskManager
-            multiplier = self.risk_manager.get_position_multiplier(symbol)
-            position_usdt = self.config.base_risk_per_trade * self.risk_manager.current_capital * multiplier
+            qty = position_usdt / current_price
+            qty_step = filters["qty_step"]
+            if qty_step > 0:
+                qty = math.floor(qty / qty_step) * qty_step
             
-            # Рассчитываем количество
-            qty = OrderManager.calculate_qty(position_usdt, current_price, filters)
+            min_qty = filters["min_qty"]
+            qty = max(qty, min_qty)
             
-            # Рассчитываем TP и SL
+            if qty * current_price < filters["min_notional"]:
+                qty = math.ceil(filters["min_notional"] / current_price / qty_step) * qty_step
+                logger.info(f"📊 Увеличили количество до {qty} для мин. суммы")
+            
+            # ===== 4. РАСЧЕТ TP/SL =====
             local_high = data["local_high"]
             tp_price = local_high * (1 - self.config.tp_percent)
             sl_price = current_price * self.config.sl_multiplier
             
-            # Округляем цены
-            tp_price = OrderManager.round_price(tp_price, filters["tick_size"])
-            sl_price = OrderManager.round_price(sl_price, filters["tick_size"])
+            tick_size = filters["tick_size"]
+            tp_price = math.floor(tp_price / tick_size) * tick_size
+            sl_price = math.floor(sl_price / tick_size) * tick_size
             
-            # Проверяем минимальную сумму
-            if qty * current_price < filters["min_notional"]:
-                logger.warning(f"{symbol}: сумма меньше минимальной, пропускаем")
-                return
-            
-            # ========== ВАЖНО: Отменяем все старые ордера перед открытием новой позиции ==========
-            logger.info(f"Отменяем старые ордера для {symbol} перед открытием позиции")
+            # ===== 5. ОТМЕНЯЕМ СТАРЫЕ ОРДЕРА =====
+            logger.info(f"🔄 Отменяем старые ордера для {symbol}")
             self.cancel_all_orders_for_symbol(symbol)
             
-            # Открываем позицию (market sell)
+            # ===== 6. ОТКРЫВАЕМ SHORT =====
+            logger.info(f"🚀 Открываем SHORT {symbol} по рынку, qty={qty}")
             response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
@@ -453,83 +470,93 @@ class ShortBot:
             )
             
             if response.get("retCode") != 0:
-                logger.error(f"Ошибка открытия позиции {symbol}: {response.get('retMsg')}")
+                logger.error(f"❌ Ошибка открытия: {response.get('retMsg')}")
                 return
             
-            # Сохраняем позицию
+            # ===== 7. ПОЛУЧАЕМ РЕАЛЬНЫЕ ДАННЫЕ =====
+            time.sleep(1)  # Ждем исполнения
+            positions = self.client.get_position_info(symbol)
+            if positions and len(positions) > 0:
+                actual_entry = float(positions[0].get('avgPrice', current_price))
+                actual_qty = float(positions[0].get('size', qty))
+            else:
+                actual_entry = current_price
+                actual_qty = qty
+                logger.warning(f"⚠️ Не удалось получить информацию о позиции, использую расчетные данные")
+            
+            # ===== 8. СОХРАНЯЕМ ПОЗИЦИЮ =====
             position = {
                 "symbol": symbol,
-                "entry_price": current_price,
+                "entry_price": actual_entry,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
-                "qty": qty,
+                "qty": actual_qty,
                 "open_time": int(time.time()),
                 "multiplier": multiplier,
                 "position_usdt": position_usdt,
                 "local_high": local_high
             }
-            
             self.tracker.add_position(position)
             
-            # Выставляем TP и SL лимитниками
-            # Снова отменяем ордера (на всякий случай, если что-то появилось за микросекунды)
-            self.cancel_all_orders_for_symbol(symbol)
-            
-            # TP ордер
-            # TP ордер (Buy Limit - закрытие шорта при падении)
-            logger.info(f"Выставляем TP для {symbol} по цене {tp_price}")
+            # ===== 9. ВЫСТАВЛЯЕМ TP (условный) =====
+            logger.info(f"🎯 TP по {tp_price:.6f}")
             tp_response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
-                side="Buy",  # 👈 TP для шорта = Buy
-                orderType="Limit",
-                qty=str(qty),
-                price=str(tp_price),
+                side="Buy",
+                orderType="TakeProfit",  # Условный ордер
+                qty=str(actual_qty),
+                triggerPrice=str(tp_price),
                 timeInForce="GTC",
-                reduceOnly=True  # 👈 ДОБАВИТЬ (важно для TP/SL)
+                reduceOnly=True,
+                orderLinkId=f"tp_{int(time.time())}"
             )
             
             if tp_response.get("retCode") != 0:
-                logger.error(f"Ошибка выставления TP для {symbol}: {tp_response.get('retMsg')}")
+                logger.error(f"❌ TP ошибка: {tp_response.get('retMsg')}")
             else:
-                logger.info(f"TP ордер для {symbol} выставлен по цене {tp_price}")
+                logger.info(f"✅ TP условный ордер выставлен")
             
-            # SL ордер (Buy Limit - закрытие шорта при росте)
-            logger.info(f"Выставляем SL для {symbol} по цене {sl_price}")
+            # ===== 10. ВЫСТАВЛЯЕМ SL (условный) =====
+            logger.info(f"🛑 SL по {sl_price:.6f}")
             sl_response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
-                side="Buy",  # 👈 SL для шорта = Buy
-                orderType="Limit",
-                qty=str(qty),
-                price=str(sl_price),
+                side="Buy",
+                orderType="Stop",  # Условный ордер
+                qty=str(actual_qty),
+                triggerPrice=str(sl_price),
                 timeInForce="GTC",
-                reduceOnly=True  # 👈 ДОБАВИТЬ (важно для TP/SL)
+                reduceOnly=True,
+                orderLinkId=f"sl_{int(time.time())}"
             )
             
             if sl_response.get("retCode") != 0:
-                logger.error(f"Ошибка выставления SL для {symbol}: {sl_response.get('retMsg')}")
+                logger.error(f"❌ SL ошибка: {sl_response.get('retMsg')}")
             else:
-                logger.info(f"SL ордер для {symbol} выставлен по цене {sl_price}")
+                logger.info(f"✅ SL условный ордер выставлен")
             
-            # Уведомление в Telegram
+            # ===== 11. УДАЛЯЕМ ИЗ WATCHLIST =====
+            if symbol in self.tracker.watchlist:
+                del self.tracker.watchlist[symbol]
+            
+            self.tracker.save()
+            
+            # ===== 12. УВЕДОМЛЕНИЕ =====
             self.notifier.send_trade_open(
-                symbol, current_price, tp_price, sl_price,
+                symbol, actual_entry, tp_price, sl_price,
                 position_usdt, multiplier
             )
             
-            # Удаляем из watchlist
-            del self.tracker.watchlist[symbol]
-            self.tracker.save()
-            
-            logger.info(f"ОТКРЫТА ПОЗИЦИЯ {symbol}")
-            logger.info(f"   Вход: ${current_price:.6f}")
-            logger.info(f"   TP: ${tp_price:.6f} ({(tp_price/current_price-1)*100:.1f}%)")
+            logger.info(f"✅✅✅ ПОЗИЦИЯ ОТКРЫТА {symbol}")
+            logger.info(f"   Вход: ${actual_entry:.6f}")
+            logger.info(f"   TP: ${tp_price:.6f} ({(tp_price/actual_entry-1)*100:.1f}%)")
             logger.info(f"   SL: ${sl_price:.6f} ({self.config.sl_multiplier}x)")
-            logger.info(f"   Размер: ${position_usdt:.2f} ({multiplier:.1f}x)")
-            
+            logger.info(f"   Размер: ${position_usdt:.2f} ({multiplier:.1f}x от 1%)")
+            logger.info(f"   Реальное кол-во: {actual_qty}")
+        
         except Exception as e:
-            logger.error(f"Ошибка открытия позиции {symbol}: {e}")
+            logger.error(f"❌ Ошибка открытия позиции {symbol}: {e}", exc_info=True)
     
     def check_positions(self):
         """Проверить открытые позиции"""
@@ -562,24 +589,29 @@ class ShortBot:
         try:
             position = self.tracker.positions.get(symbol)
             if not position:
+                logger.warning(f"⚠️ Нет позиции {symbol} в трекере")
                 return
             
-            # ========== ВАЖНО: Отменяем все старые ордера перед закрытием ==========
-            logger.info(f"Отменяем старые ордера для {symbol} перед закрытием позиции")
+            # ===== Отменяем все старые ордера =====
+            logger.info(f"🔄 Отменяем ордера для {symbol} перед закрытием")
             self.cancel_all_orders_for_symbol(symbol)
             
-            # Закрываем позицию (market buy)
+            # ===== Закрываем позицию =====
+            logger.info(f"🔴 Закрываем {symbol} по {reason}, цена {price:.6f}")
+            
+            # ВАЖНО: для закрытия шорта используем Buy с reduceOnly=True
             response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
-                side="Buy",
+                side="Buy",  # закрытие шорта = Buy
                 orderType="Market",
                 qty=str(position["qty"]),
-                timeInForce="IOC"
+                timeInForce="IOC",
+                reduceOnly=True  # 👈 КРИТИЧЕСКИ ВАЖНО
             )
             
             if response.get("retCode") != 0:
-                logger.error(f"Ошибка закрытия {symbol}: {response.get('retMsg')}")
+                logger.error(f"❌ Ошибка закрытия {symbol}: {response.get('retMsg')}")
                 return
             
             # Рассчитываем PnL
@@ -593,7 +625,7 @@ class ShortBot:
             # Удаляем позицию
             self.tracker.remove_position(symbol)
             
-            # Еще раз отменяем ордера (на случай, если рыночный ордер не закрыл лимитники)
+            # Еще раз отменяем ордера
             self.cancel_all_orders_for_symbol(symbol)
             
             # Уведомление
@@ -605,13 +637,11 @@ class ShortBot:
                 reason, duration_str
             )
             
-            logger.info(f"{'' if pnl_usdt > 0 else ''} ЗАКРЫТА {symbol}")
-            logger.info(f"   Причина: {reason}")
-            logger.info(f"   Вход: ${entry:.6f} -> Выход: ${price:.6f}")
-            logger.info(f"   PnL: ${pnl_usdt:.2f} ({pnl_percent:.1f}%)")
+            emoji = "💰" if pnl_usdt > 0 else "📉"
+            logger.info(f"{emoji} ЗАКРЫТА {symbol}: {reason}, PnL: ${pnl_usdt:.2f} ({pnl_percent:.1f}%)")
             
         except Exception as e:
-            logger.error(f"Ошибка закрытия {symbol}: {e}")
+            logger.error(f"❌ Ошибка закрытия {symbol}: {e}", exc_info=True)
     
     def run(self):
         """Основной цикл бота"""
