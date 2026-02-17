@@ -72,3 +72,8 @@ class PositionTracker:
         if symbol in self.watchlist:
             del self.watchlist[symbol]
             self.save()
+    
+    def reload_from_file(self):
+        """Принудительно перезагрузить состояние из файла"""
+        self.load()
+        logger.info(f"Перезагружено из файла: {len(self.positions)} positions, {len(self.watchlist)} watchlist")
