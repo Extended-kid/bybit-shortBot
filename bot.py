@@ -398,6 +398,11 @@ class ShortBot:
         except Exception as e:
             logger.error(f"Ошибка при отмене ордеров для {symbol}: {e}")
     
+    def reload_from_file(self):
+        """Принудительно перезагрузить состояние из файла"""
+        self.load()
+        logger.info(f"Перезагружено из файла: {len(self.positions)} positions, {len(self.watchlist)} watchlist")
+    
     def open_position(self, symbol: str, data: Dict[str, Any]):
         """Открыть короткую позицию"""
         try:
@@ -645,6 +650,7 @@ class ShortBot:
     
     def run(self):
         """Основной цикл бота"""
+        self.tracker.reload_from_file()
         logger.info("Запуск основного цикла")
         
         while self.running:
