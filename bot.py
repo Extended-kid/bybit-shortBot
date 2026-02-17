@@ -365,6 +365,39 @@ class ShortBot:
         self.tracker.save()
         return ready
     
+    def cancel_all_orders_for_symbol(self, symbol: str):
+        """Отменить все открытые ордера по символу"""
+        try:
+            response = self.client.session.get_open_orders(
+                category=self.config.category,
+                symbol=symbol
+            )
+            
+            if response.get("retCode") != 0:
+                logger.error(f"Ошибка получения ордеров для {symbol}: {response.get('retMsg')}")
+                return
+            
+            orders = response["result"]["list"]
+            if not orders:
+                return
+            
+            for order in orders:
+                try:
+                    cancel_response = self.client.session.cancel_order(
+                        category=self.config.category,
+                        symbol=symbol,
+                        orderId=order["orderId"]
+                    )
+                    if cancel_response.get("retCode") == 0:
+                        logger.info(f"Отменен ордер {order['orderId']} для {symbol} (цена: {order.get('price', 'N/A')})")
+                    else:
+                        logger.error(f"Ошибка отмены ордера {order['orderId']}: {cancel_response.get('retMsg')}")
+                except Exception as e:
+                    logger.error(f"Ошибка при отмене ордера {order.get('orderId')}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Ошибка при отмене ордеров для {symbol}: {e}")
+    
     def open_position(self, symbol: str, data: Dict[str, Any]):
         """Открыть короткую позицию"""
         try:
@@ -405,7 +438,11 @@ class ShortBot:
                 logger.warning(f"{symbol}: сумма меньше минимальной, пропускаем")
                 return
             
-            # Открываем позицию
+            # ========== ВАЖНО: Отменяем все старые ордера перед открытием новой позиции ==========
+            logger.info(f"Отменяем старые ордера для {symbol} перед открытием позиции")
+            self.cancel_all_orders_for_symbol(symbol)
+            
+            # Открываем позицию (market sell)
             response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
@@ -434,8 +471,12 @@ class ShortBot:
             
             self.tracker.add_position(position)
             
-            # Выставляем TP и SL
-            self.client.place_order(
+            # Выставляем TP и SL лимитниками
+            # Снова отменяем ордера (на всякий случай, если что-то появилось за микросекунды)
+            self.cancel_all_orders_for_symbol(symbol)
+            
+            # TP ордер
+            tp_response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
                 side="Buy",
@@ -445,7 +486,13 @@ class ShortBot:
                 timeInForce="GTC"
             )
             
-            self.client.place_order(
+            if tp_response.get("retCode") != 0:
+                logger.error(f"Ошибка выставления TP для {symbol}: {tp_response.get('retMsg')}")
+            else:
+                logger.info(f"TP ордер для {symbol} выставлен по цене {tp_price}")
+            
+            # SL ордер
+            sl_response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
                 side="Buy",
@@ -455,7 +502,12 @@ class ShortBot:
                 timeInForce="GTC"
             )
             
-            # Уведомление
+            if sl_response.get("retCode") != 0:
+                logger.error(f"Ошибка выставления SL для {symbol}: {sl_response.get('retMsg')}")
+            else:
+                logger.info(f"SL ордер для {symbol} выставлен по цене {sl_price}")
+            
+            # Уведомление в Telegram
             self.notifier.send_trade_open(
                 symbol, current_price, tp_price, sl_price,
                 position_usdt, multiplier
@@ -478,6 +530,7 @@ class ShortBot:
         """Проверить открытые позиции"""
         for symbol, position in list(self.tracker.positions.items()):
             try:
+                # Получаем текущую цену
                 tickers = self.get_all_tickers()
                 current_price = None
                 for t in tickers:
@@ -488,8 +541,11 @@ class ShortBot:
                 if not current_price:
                     continue
                 
+                # Проверяем TP
                 if current_price <= position["tp_price"]:
                     self.close_position(symbol, "TP", current_price)
+                
+                # Проверяем SL
                 elif current_price >= position["sl_price"]:
                     self.close_position(symbol, "SL", current_price)
                     
@@ -503,6 +559,11 @@ class ShortBot:
             if not position:
                 return
             
+            # ========== ВАЖНО: Отменяем все старые ордера перед закрытием ==========
+            logger.info(f"Отменяем старые ордера для {symbol} перед закрытием позиции")
+            self.cancel_all_orders_for_symbol(symbol)
+            
+            # Закрываем позицию (market buy)
             response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
@@ -516,13 +577,21 @@ class ShortBot:
                 logger.error(f"Ошибка закрытия {symbol}: {response.get('retMsg')}")
                 return
             
+            # Рассчитываем PnL
             entry = position["entry_price"]
             pnl_usdt = (entry - price) * position["qty"]
             pnl_percent = (entry - price) / entry * 100
             
+            # Обновляем риск-менеджер
             self.risk_manager.on_trade_result(pnl_usdt, pnl_percent, symbol)
+            
+            # Удаляем позицию
             self.tracker.remove_position(symbol)
             
+            # Еще раз отменяем ордера (на случай, если рыночный ордер не закрыл лимитники)
+            self.cancel_all_orders_for_symbol(symbol)
+            
+            # Уведомление
             duration = int(time.time()) - position["open_time"]
             duration_str = f"{duration // 60}м {duration % 60}с"
             
@@ -545,14 +614,17 @@ class ShortBot:
         
         while self.running:
             try:
+                # Проверяем закрытие свечи
                 current_bar = self.get_current_bar_close()
                 
                 if current_bar != self.last_bar_close:
                     self.last_bar_close = current_bar
                     logger.info(f"Новая свеча: {datetime.fromtimestamp(current_bar)}")
                     
+                    # Получаем все тикеры
                     tickers = self.get_all_tickers()
                     
+                    # Ищем кандидатов на памп
                     candidates = []
                     for t in tickers:
                         cand = self.check_pump_candidate(t)
@@ -563,14 +635,17 @@ class ShortBot:
                         logger.info(f"Найдено кандидатов: {len(candidates)}")
                         self.update_watchlist(candidates)
                     
+                    # Проверяем stall условия
                     ready = self.check_stall()
                     if ready:
                         logger.info(f"Готовы к входу: {len(ready)}")
                         for symbol, data in ready:
                             self.open_position(symbol, data)
                     
+                    # Проверяем открытые позиции
                     self.check_positions()
                     
+                    # Показываем статистику
                     logger.info(f"Статистика: watchlist={len(self.tracker.watchlist)}, "
                               f"positions={len(self.tracker.positions)}, "
                               f"balance=${self.risk_manager.current_capital:.2f}")
