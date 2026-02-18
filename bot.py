@@ -412,8 +412,7 @@ class ShortBot:
                 return
             
             # Проверяем баланс
-            balance = self.client.get_balance()
-            available = float(balance['USDT']['availableBalance'])
+            available = self.get_balance()
             position_usdt = self.config.base_risk_per_trade * self.risk_manager.current_capital
             multiplier = self.risk_manager.get_position_multiplier(symbol)
             position_usdt *= multiplier
