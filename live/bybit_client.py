@@ -106,10 +106,9 @@ class BybitClient:
         self._update_rate_limits(response)
         return response
     
-    def get_position_info(self, symbol: str) -> List[Dict[str, Any]]:
+    def get_positions(self, symbol: str) -> List[Dict[str, Any]]:
         """Получить информацию о позиции по символу"""
         try:
-            # В pybit 5.14.0 метод называется get_positions, а не get_position_info
             response = self.session.get_positions(
                 category=self.category,
                 symbol=symbol
