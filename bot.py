@@ -404,14 +404,24 @@ class ShortBot:
         logger.info(f"Перезагружено из файла: {len(self.positions)} positions, {len(self.watchlist)} watchlist")
     
     def open_position(self, symbol: str, data: Dict[str, Any]):
-        """Открыть короткую позицию"""
+        """Открыть короткую позицию с защитой от дублей"""
         try:
-            # ===== 1. ПРОВЕРКИ =====
-            if symbol in self.tracker.positions:
-                logger.warning(f"⛔ Уже есть позиция по {symbol}, пропускаем")
+            # ===== 1. ПРОВЕРКА ЧЕРЕЗ API =====
+            existing_positions = self.client.get_position_info(symbol)
+            if existing_positions and len(existing_positions) > 0:
+                logger.warning(f"⛔ На бирже уже есть позиция по {symbol} (размер: {existing_positions[0].get('size')}), пропускаем")
+                # Добавляем в локальный трекер, чтобы больше не пытаться
+                if symbol not in self.tracker.positions:
+                    self.tracker.positions[symbol] = {"status": "exists_on_exchange"}
+                    self.tracker.save()
                 return
             
-            # Проверяем баланс
+            # ===== 2. ПРОВЕРКА ЛОКАЛЬНАЯ =====
+            if symbol in self.tracker.positions:
+                logger.warning(f"⛔ Уже есть позиция в трекере по {symbol}, пропускаем")
+                return
+            
+            # ===== 3. ПРОВЕРКА БАЛАНСА =====
             available = self.get_balance()
             position_usdt = self.config.base_risk_per_trade * self.risk_manager.current_capital
             multiplier = self.risk_manager.get_position_multiplier(symbol)
@@ -421,7 +431,7 @@ class ShortBot:
                 logger.error(f"❌ Недостаточно баланса: {available:.2f} < {position_usdt:.2f}")
                 return
             
-            # ===== 2. ПОЛУЧАЕМ ЦЕНУ =====
+            # ===== 4. ПОЛУЧАЕМ ЦЕНУ =====
             tickers = self.get_all_tickers()
             current_price = None
             for t in tickers:
@@ -433,7 +443,7 @@ class ShortBot:
                 logger.error(f"❌ Не удалось получить цену для {symbol}")
                 return
             
-            # ===== 3. РАСЧЕТ КОЛИЧЕСТВА =====
+            # ===== 5. РАСЧЕТ КОЛИЧЕСТВА =====
             instr = self.client.get_instruments(symbol)
             filters = OrderManager.extract_filters(instr)
             
@@ -449,7 +459,7 @@ class ShortBot:
                 qty = math.ceil(filters["min_notional"] / current_price / qty_step) * qty_step
                 logger.info(f"📊 Увеличили количество до {qty} для мин. суммы")
             
-            # ===== 4. РАСЧЕТ TP/SL =====
+            # ===== 6. РАСЧЕТ TP/SL =====
             local_high = data["local_high"]
             tp_price = local_high * (1 - self.config.tp_percent)
             sl_price = current_price * self.config.sl_multiplier
@@ -458,11 +468,11 @@ class ShortBot:
             tp_price = math.floor(tp_price / tick_size) * tick_size
             sl_price = math.floor(sl_price / tick_size) * tick_size
             
-            # ===== 5. ОТМЕНЯЕМ СТАРЫЕ ОРДЕРА =====
+            # ===== 7. ОТМЕНЯЕМ СТАРЫЕ ОРДЕРА =====
             logger.info(f"🔄 Отменяем старые ордера для {symbol}")
             self.cancel_all_orders_for_symbol(symbol)
             
-            # ===== 6. ОТКРЫВАЕМ SHORT =====
+            # ===== 8. ОТКРЫВАЕМ SHORT =====
             logger.info(f"🚀 Открываем SHORT {symbol} по рынку, qty={qty}")
             response = self.client.place_order(
                 category=self.config.category,
@@ -477,44 +487,56 @@ class ShortBot:
                 logger.error(f"❌ Ошибка открытия: {response.get('retMsg')}")
                 return
             
-            # ===== 7. ПОЛУЧАЕМ РЕАЛЬНЫЕ ДАННЫЕ =====
+            # ===== 9. СОХРАНЯЕМ В ТРЕКЕР НЕМЕДЛЕННО (ДАЖЕ БЕЗ РЕАЛЬНЫХ ДАННЫХ) =====
+            position = {
+                "symbol": symbol,
+                "entry_price": current_price,
+                "tp_price": tp_price,
+                "sl_price": sl_price,
+                "qty": qty,
+                "open_time": int(time.time()),
+                "multiplier": multiplier,
+                "position_usdt": position_usdt,
+                "local_high": local_high,
+                "status": "opening"
+            }
+            self.tracker.add_position(position)
+            self.tracker.save()
+            logger.info(f"✅ Позиция сохранена в трекер (временные данные)")
+            
+            # ===== 10. ПОЛУЧАЕМ РЕАЛЬНЫЕ ДАННЫЕ =====
             time.sleep(1)  # Ждем исполнения
             try:
                 position_info = self.client.get_position_info(symbol)
                 if position_info and len(position_info) > 0:
                     actual_entry = float(position_info[0].get('avgPrice', current_price))
                     actual_qty = float(position_info[0].get('size', qty))
+                    
+                    # Обновляем позицию с реальными данными
+                    self.tracker.positions[symbol].update({
+                        "entry_price": actual_entry,
+                        "qty": actual_qty,
+                        "status": "open"
+                    })
+                    self.tracker.save()
+                    logger.info(f"✅ Позиция обновлена реальными данными: entry={actual_entry}, qty={actual_qty}")
                 else:
-                    actual_entry = current_price
-                    actual_qty = qty
-                    logger.warning(f"⚠️ Не удалось получить информацию о позиции, использую расчетные данные")
+                    logger.warning(f"⚠️ Не удалось получить информацию о позиции, оставляем расчетные данные")
+                    self.tracker.positions[symbol]["status"] = "open"
+                    self.tracker.save()
             except Exception as e:
                 logger.error(f"Ошибка при получении информации о позиции: {e}")
-                actual_entry = current_price
-                actual_qty = qty
+                self.tracker.positions[symbol]["status"] = "open"
+                self.tracker.save()
             
-            # ===== 8. СОХРАНЯЕМ ПОЗИЦИЮ =====
-            position = {
-                "symbol": symbol,
-                "entry_price": actual_entry,
-                "tp_price": tp_price,
-                "sl_price": sl_price,
-                "qty": actual_qty,
-                "open_time": int(time.time()),
-                "multiplier": multiplier,
-                "position_usdt": position_usdt,
-                "local_high": local_high
-            }
-            self.tracker.add_position(position)
-            
-            # ===== 9. ВЫСТАВЛЯЕМ TP (условный) =====
+            # ===== 11. ВЫСТАВЛЯЕМ TP =====
             logger.info(f"🎯 TP по {tp_price:.6f}")
             tp_response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
                 side="Buy",
-                orderType="TakeProfit",  # Условный ордер
-                qty=str(actual_qty),
+                orderType="TakeProfit",
+                qty=str(actual_qty if 'actual_qty' in locals() else qty),
                 triggerPrice=str(tp_price),
                 timeInForce="GTC",
                 reduceOnly=True,
@@ -526,14 +548,14 @@ class ShortBot:
             else:
                 logger.info(f"✅ TP условный ордер выставлен")
             
-            # ===== 10. ВЫСТАВЛЯЕМ SL (условный) =====
+            # ===== 12. ВЫСТАВЛЯЕМ SL =====
             logger.info(f"🛑 SL по {sl_price:.6f}")
             sl_response = self.client.place_order(
                 category=self.config.category,
                 symbol=symbol,
                 side="Buy",
-                orderType="Stop",  # Условный ордер
-                qty=str(actual_qty),
+                orderType="Stop",
+                qty=str(actual_qty if 'actual_qty' in locals() else qty),
                 triggerPrice=str(sl_price),
                 timeInForce="GTC",
                 reduceOnly=True,
@@ -545,24 +567,28 @@ class ShortBot:
             else:
                 logger.info(f"✅ SL условный ордер выставлен")
             
-            # ===== 11. УДАЛЯЕМ ИЗ WATCHLIST =====
+            # ===== 13. УДАЛЯЕМ ИЗ WATCHLIST =====
             if symbol in self.tracker.watchlist:
                 del self.tracker.watchlist[symbol]
             
             self.tracker.save()
             
-            # ===== 12. УВЕДОМЛЕНИЕ =====
+            # ===== 14. УВЕДОМЛЕНИЕ =====
             self.notifier.send_trade_open(
-                symbol, actual_entry, tp_price, sl_price,
-                position_usdt, multiplier
+                symbol, 
+                self.tracker.positions[symbol]["entry_price"], 
+                tp_price, 
+                sl_price,
+                position_usdt, 
+                multiplier
             )
             
             logger.info(f"✅✅✅ ПОЗИЦИЯ ОТКРЫТА {symbol}")
-            logger.info(f"   Вход: ${actual_entry:.6f}")
-            logger.info(f"   TP: ${tp_price:.6f} ({(tp_price/actual_entry-1)*100:.1f}%)")
+            logger.info(f"   Вход: ${self.tracker.positions[symbol]['entry_price']:.6f}")
+            logger.info(f"   TP: ${tp_price:.6f} ({((tp_price/self.tracker.positions[symbol]['entry_price'])-1)*100:.1f}%)")
             logger.info(f"   SL: ${sl_price:.6f} ({self.config.sl_multiplier}x)")
             logger.info(f"   Размер: ${position_usdt:.2f} ({multiplier:.1f}x от 1%)")
-            logger.info(f"   Реальное кол-во: {actual_qty}")
+            logger.info(f"   Реальное кол-во: {self.tracker.positions[symbol]['qty']}")
         
         except Exception as e:
             logger.error(f"❌ Ошибка открытия позиции {symbol}: {e}", exc_info=True)

@@ -1,6 +1,6 @@
 ﻿import time
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pybit.unified_trading import HTTP
 from tenacity import retry, stop_after_attempt, wait_exponential
 
