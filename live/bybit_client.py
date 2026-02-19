@@ -109,7 +109,8 @@ class BybitClient:
     def get_position_info(self, symbol: str) -> List[Dict[str, Any]]:
         """Получить информацию о позиции по символу"""
         try:
-            response = self.session.get_position_info(
+            # В pybit 5.14.0 метод называется get_positions, а не get_position_info
+            response = self.session.get_positions(
                 category=self.category,
                 symbol=symbol
             )
