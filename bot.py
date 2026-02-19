@@ -381,6 +381,7 @@ class ShortBot:
                 timeInForce="IOC",
                 takeProfit=str(tp_price),
                 stopLoss=str(sl_price),
+                tpslMode="Full",
                 tpTriggerBy="MarkPrice",
                 slTriggerBy="MarkPrice",
                 tpOrderType="Market",
