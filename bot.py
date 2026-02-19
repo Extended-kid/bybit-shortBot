@@ -315,7 +315,7 @@ class ShortBot:
                 return
             
             # Проверка на бирже (чтобы избежать дубликатов)
-            existing_positions = self.client.get_positions(category="linear", symbol=symbol)
+            existing_positions = self.client.get_positions(symbol=symbol)
             if existing_positions and len(existing_positions) > 0 and float(existing_positions[0]['size']) > 0:
                 logger.warning(f"⛔ На бирже уже есть позиция по {symbol} (размер: {existing_positions[0]['size']}), пропускаем")
                 return
@@ -392,7 +392,7 @@ class ShortBot:
             
             # Получение реальных данных (фикс partial fill)
             time.sleep(1)
-            position_info = self.client.get_positions(category="linear", symbol=symbol)
+            position_info = self.client.get_positions(symbol=symbol)
             if position_info and len(position_info) > 0:
                 actual_entry = float(position_info[0]['avgPrice'])
                 actual_qty = float(position_info[0]['size'])
