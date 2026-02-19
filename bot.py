@@ -479,14 +479,19 @@ class ShortBot:
             
             # ===== 7. ПОЛУЧАЕМ РЕАЛЬНЫЕ ДАННЫЕ =====
             time.sleep(1)  # Ждем исполнения
-            positions = self.client.get_position_info(symbol)
-            if positions and len(positions) > 0:
-                actual_entry = float(positions[0].get('avgPrice', current_price))
-                actual_qty = float(positions[0].get('size', qty))
-            else:
+            try:
+                position_info = self.client.get_position_info(symbol)
+                if position_info and len(position_info) > 0:
+                    actual_entry = float(position_info[0].get('avgPrice', current_price))
+                    actual_qty = float(position_info[0].get('size', qty))
+                else:
+                    actual_entry = current_price
+                    actual_qty = qty
+                    logger.warning(f"⚠️ Не удалось получить информацию о позиции, использую расчетные данные")
+            except Exception as e:
+                logger.error(f"Ошибка при получении информации о позиции: {e}")
                 actual_entry = current_price
                 actual_qty = qty
-                logger.warning(f"⚠️ Не удалось получить информацию о позиции, использую расчетные данные")
             
             # ===== 8. СОХРАНЯЕМ ПОЗИЦИЮ =====
             position = {

@@ -17,6 +17,7 @@ class BybitClient:
         )
         self.rate_limit_remaining = 50
         self.rate_limit_reset = 0
+        self.category = "linear"
     
     @retry(
         stop=stop_after_attempt(3),
@@ -104,3 +105,19 @@ class BybitClient:
             raise RuntimeError(f"API Error: {response.get('retMsg')}")
         self._update_rate_limits(response)
         return response
+    
+    def get_position_info(self, symbol: str) -> List[Dict[str, Any]]:
+        """Получить информацию о позиции по символу"""
+        try:
+            response = self.session.get_position_info(
+                category=self.category,
+                symbol=symbol
+            )
+            if response.get("retCode") == 0:
+                return response["result"]["list"]
+            else:
+                logger.error(f"Ошибка получения позиции {symbol}: {response.get('retMsg')}")
+                return []
+        except Exception as e:
+            logger.error(f"Ошибка получения позиции {symbol}: {e}")
+            return []
