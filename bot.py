@@ -439,6 +439,28 @@ class ShortBot:
     def check_positions(self):
         for symbol, position in list(self.tracker.positions.items()):
             try:
+                # Проверяем наличие на бирже
+                position_info = self.client.get_positions(symbol)
+                if not position_info or len(position_info) == 0 or float(position_info[0]['size']) == 0:
+                    logger.info(f"📌 Позиция {symbol} закрылась на бирже, удаляем из трекера")
+                    
+                    # Можно отправить уведомление о закрытии
+                    entry = position["entry_price"]
+                    # Получаем цену закрытия из позиции или текущую
+                    close_price = float(position_info[0]['avgPrice']) if position_info else 0
+                    pnl_usdt = (entry - close_price) * position["qty"]
+                    pnl_percent = (entry - close_price) / entry * 100
+                    
+                    self.notifier.send_trade_close(
+                        symbol, entry, close_price, pnl_usdt, pnl_percent,
+                        "TP/SL", "авто"
+                    )
+                    
+                    del self.tracker.positions[symbol]
+                    self.tracker.save()
+                    continue
+
+                # Проверка ключей
                 required_keys = ['tp_price', 'sl_price', 'qty', 'entry_price']
                 missing = [k for k in required_keys if k not in position]
                 if missing:
@@ -446,89 +468,32 @@ class ShortBot:
                     del self.tracker.positions[symbol]
                     self.tracker.save()
                     continue
-                if float(position['qty']) <= 0:
-                    logger.warning(f"⚠️ Позиция {symbol} с qty=0, удаляем")
-                    del self.tracker.positions[symbol]
-                    self.tracker.save()
-                    continue
-
-                tickers = self.get_all_tickers()
-                current_price = None
-                for t in tickers:
-                    if t["symbol"] == symbol:
-                        current_price = float(t["lastPrice"])
-                        break
-                if not current_price:
-                    continue
-
-                if current_price <= position["tp_price"]:
-                    self.close_position(symbol, "TP", current_price)
-                elif current_price >= position["sl_price"]:
-                    self.close_position(symbol, "SL", current_price)
 
             except Exception as e:
                 logger.error(f"Ошибка проверки {symbol}: {e}")
 
-    def close_position(self, symbol: str, reason: str, price: float):
-        try:
-            position = self.tracker.positions.get(symbol)
-            if not position:
-                logger.warning(f"⚠️ Нет позиции {symbol} в трекере")
-                return
-
-            logger.info(f"🔄 Отменяем ордера для {symbol} перед закрытием")
-            self.cancel_all_orders_for_symbol(symbol)
-
-            logger.info(f"🔴 Закрываем {symbol} по {reason}, цена {price:.6f}")
-            response = self.client.place_order(
-                category=self.config.category,
-                symbol=symbol,
-                side="Buy",
-                orderType="Market",
-                qty=str(position["qty"]),
-                timeInForce="IOC",
-                reduceOnly=True
-            )
-
-            if response.get("retCode") != 0:
-                logger.error(f"❌ Ошибка закрытия {symbol}: {response.get('retMsg')}")
-                return
-
-            entry = position["entry_price"]
-            pnl_usdt = (entry - price) * position["qty"]
-            pnl_percent = (entry - price) / entry * 100
-
-            self.risk_manager.on_trade_result(pnl_usdt, pnl_percent, symbol)
-            del self.tracker.positions[symbol]
-            self.tracker.save()
-
-            self.cancel_all_orders_for_symbol(symbol)
-
-            duration = int(time.time()) - position["open_time"]
-            duration_str = f"{duration // 60}м {duration % 60}с"
-
-            self.notifier.send_trade_close(
-                symbol, entry, price, pnl_usdt, pnl_percent,
-                reason, duration_str
-            )
-
-            emoji = "💰" if pnl_usdt > 0 else "📉"
-            logger.info(f"{emoji} ЗАКРЫТА {symbol}: {reason}, PnL: ${pnl_usdt:.2f} ({pnl_percent:.1f}%)")
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка закрытия {symbol}: {e}", exc_info=True)
 
     def run(self):
         self.reload_from_file()
         logger.info("Запуск основного цикла")
-
+        
+        # Для суточной статистики
+        last_daily_report = datetime.now().date()
+        
         while self.running:
             try:
                 current_bar = self.get_current_bar_close()
+                
+                # Суточная статистика в 00:05
+                today = datetime.now().date()
+                if today != last_daily_report and datetime.now().hour == 0 and datetime.now().minute >= 5:
+                    self.send_daily_stats()
+                    last_daily_report = today
+                
                 if current_bar != self.last_bar_close:
                     self.last_bar_close = current_bar
                     logger.info(f"Новая свеча: {datetime.fromtimestamp(current_bar)}")
-
+                    
                     tickers = self.get_all_tickers()
                     candidates = []
                     for t in tickers:
@@ -548,8 +513,8 @@ class ShortBot:
                     self.check_positions()
 
                     logger.info(f"Статистика: watchlist={len(self.tracker.watchlist)}, "
-                              f"positions={len(self.tracker.positions)}, "
-                              f"balance=${self.risk_manager.current_capital:.2f}")
+                            f"positions={len(self.tracker.positions)}, "
+                            f"balance=${self.risk_manager.current_capital:.2f}")
 
                 time.sleep(self.config.wake_seconds)
 
@@ -560,6 +525,29 @@ class ShortBot:
                 time.sleep(10)
 
         logger.info("Бот остановлен")
+    
+    def send_daily_stats(self):
+        """Отправить суточную статистику"""
+        try:
+            # Собираем статистику за сегодня
+            today = datetime.now().date()
+            today_trades = [t for t in self.risk_manager.trades_history 
+                        if datetime.fromisoformat(t['time']).date() == today]
+            
+            trades_count = len(today_trades)
+            profitable = len([t for t in today_trades if t['pnl_usdt'] > 0])
+            total_pnl = sum(t['pnl_usdt'] for t in today_trades)
+            
+            self.notifier.send_daily_stats(
+                date=today.strftime('%Y-%m-%d'),
+                trades=trades_count,
+                profitable=profitable,
+                pnl=total_pnl,
+                balance=self.risk_manager.current_capital
+            )
+            logger.info(f"📊 Суточная статистика отправлена: сделок={trades_count}, PnL=${total_pnl:.2f}")
+        except Exception as e:
+            logger.error(f"Ошибка отправки суточной статистики: {e}")
 
 
 def main():

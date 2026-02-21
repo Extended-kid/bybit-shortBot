@@ -1,5 +1,6 @@
+from datetime import datetime
+
 # risk_manager.py
-# Поставь в корневую папку проекта: C:\Users\Ilja Lobossok\Desktop\byBit\bybit shortbot backtest\
 
 class RiskManager:
     """Управление рисками на основе истории монеты"""
@@ -12,6 +13,7 @@ class RiskManager:
         self.current_date = None
         self.coin_stats = {}  # История по каждой монете
         self.consecutive_losses = 0
+        self.trades_history = []  # список закрытых сделок
         
     def update_stats(self, symbol, pnl_percent):
         """Обновляем статистику по монете"""
@@ -84,7 +86,6 @@ class RiskManager:
         return True, "OK"
     
     def on_trade_result(self, pnl_usdt, pnl_percent, symbol):
-        """Обновляем состояние после сделки"""
         self.current_capital += pnl_usdt
         self.today_pnl += pnl_usdt
         
@@ -97,3 +98,14 @@ class RiskManager:
             self.consecutive_losses = 0
         
         self.update_stats(symbol, pnl_percent)
+        
+        # Добавляем сделку в историю
+        self.trades_history.append({
+            'time': datetime.now().isoformat(),
+            'symbol': symbol,
+            'pnl_usdt': pnl_usdt,
+            'pnl_percent': pnl_percent
+        })
+        # Храним только последние 1000 сделок
+        if len(self.trades_history) > 1000:
+            self.trades_history = self.trades_history[-1000:]
