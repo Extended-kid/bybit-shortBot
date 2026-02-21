@@ -41,59 +41,13 @@ from live.order_manager import OrderManager
 from live.position_tracker import PositionTracker
 from live.telegram_notifier import TelegramNotifier
 
-
 # =====================================
 # РИСК МЕНЕДЖЕР
 # =====================================
-class RiskManager:
-    def __init__(self, initial_capital=10000):
-        self.initial_capital = initial_capital
-        self.current_capital = initial_capital
-        self.peak_capital = initial_capital
-        self.today_pnl = 0
-        self.current_date = None
-        self.coin_stats = {}
-        self.consecutive_losses = 0
+# use the shared implementation located in live/risk_manager.py
+from live.risk_manager import RiskManager
 
-    def update_stats(self, symbol, pnl_percent):
-        if symbol not in self.coin_stats:
-            self.coin_stats[symbol] = {
-                'trades': 0,
-                'profitable': 0,
-                'total_pnl': 0,
-                'max_loss': 0
-            }
-        stats = self.coin_stats[symbol]
-        stats['trades'] += 1
-        stats['total_pnl'] += pnl_percent
-        if pnl_percent > 0:
-            stats['profitable'] += 1
-        else:
-            stats['max_loss'] = min(stats['max_loss'], pnl_percent)
-
-    def get_position_multiplier(self, symbol):
-        if symbol not in self.coin_stats:
-            return 0.5
-        stats = self.coin_stats[symbol]
-        if stats['trades'] < 3:
-            return 0.5
-        if stats['max_loss'] < -200:
-            return 0.25
-        win_rate = stats['profitable'] / stats['trades']
-        if win_rate < 0.7:
-            return 0.5
-        return 1.0
-
-    def on_trade_result(self, pnl_usdt, pnl_percent, symbol):
-        self.current_capital += pnl_usdt
-        self.today_pnl += pnl_usdt
-        if self.current_capital > self.peak_capital:
-            self.peak_capital = self.current_capital
-        if pnl_usdt < 0:
-            self.consecutive_losses += 1
-        else:
-            self.consecutive_losses = 0
-        self.update_stats(symbol, pnl_percent)
+# (the imported class already tracks trades_history, daily limits, etc.)
 
 
 # =====================================
@@ -309,17 +263,26 @@ class ShortBot:
 
     def open_position(self, symbol: str, data: Dict[str, Any]):
         try:
-            # Проверки
+            # общие предохранители
             if symbol in self.tracker.positions:
                 logger.warning(f"⛔ Уже есть позиция по {symbol}, пропускаем")
                 return
-            
+
+            if len(self.tracker.positions) >= self.config.max_concurrent_trades:
+                logger.warning("⛔ Достигнуто максимальное количество открытых позиций, пропускаем")
+                return
+
+            ok, reason = self.risk_manager.can_trade_today(datetime.now().date()) if hasattr(self.risk_manager, 'can_trade_today') else (True, '')
+            if not ok:
+                logger.warning(f"⛔ Пропуск открытия: {reason}")
+                return
+
             # Проверка на бирже (чтобы избежать дубликатов)
             existing_positions = self.client.get_positions(symbol=symbol)
             if existing_positions and len(existing_positions) > 0 and float(existing_positions[0]['size']) > 0:
                 logger.warning(f"⛔ На бирже уже есть позиция по {symbol} (размер: {existing_positions[0]['size']}), пропускаем")
                 return
-            
+
             # Баланс
             available = self.get_balance()
             position_usdt = self.config.base_risk_per_trade * self.risk_manager.current_capital
@@ -443,21 +406,36 @@ class ShortBot:
                 position_info = self.client.get_positions(symbol)
                 if not position_info or len(position_info) == 0 or float(position_info[0]['size']) == 0:
                     logger.info(f"📌 Позиция {symbol} закрылась на бирже, удаляем из трекера")
-                    
-                    # Можно отправить уведомление о закрытии
-                    entry = position["entry_price"]
-                    # Получаем цену закрытия из позиции или текущую
-                    close_price = float(position_info[0]['avgPrice']) if position_info else 0
-                    pnl_usdt = (entry - close_price) * position["qty"]
-                    pnl_percent = (entry - close_price) / entry * 100
-                    
+
+                    # уведомление/параметры
+                    entry = position.get("entry_price", 0)
+
+                    # если по API нет avgPrice, берём текущую цену тикера (лучше чем 0)
+                    if position_info and len(position_info) > 0:
+                        close_price = float(position_info[0].get('avgPrice', 0))
+                    else:
+                        close_price = 0
+                        tick = next((t for t in self.get_all_tickers() if t["symbol"] == symbol), None)
+                        if tick:
+                            close_price = float(tick.get("lastPrice", 0))
+
+                    pnl_usdt = (entry - close_price) * position.get("qty", 0)
+                    pnl_percent = (entry - close_price) / entry * 100 if entry != 0 else 0
+
+                    # уведомляем и обновляем статистику
                     self.notifier.send_trade_close(
                         symbol, entry, close_price, pnl_usdt, pnl_percent,
                         "TP/SL", "авто"
                     )
-                    
-                    del self.tracker.positions[symbol]
-                    self.tracker.save()
+
+                    # расчёт риска
+                    try:
+                        self.risk_manager.on_trade_result(pnl_usdt, pnl_percent, symbol)
+                    except Exception:
+                        pass
+
+                    # удаляем позицию и ставим отсчёт cooldown
+                    self.tracker.remove_position(symbol)
                     continue
 
                 # Проверка ключей
@@ -465,8 +443,8 @@ class ShortBot:
                 missing = [k for k in required_keys if k not in position]
                 if missing:
                     logger.error(f"⚠️ Неполные данные позиции {symbol} (отсутствуют: {missing}), удаляем")
-                    del self.tracker.positions[symbol]
-                    self.tracker.save()
+                    # используем helper чтобы установить cooldown
+                    self.tracker.remove_position(symbol)
                     continue
 
             except Exception as e:
