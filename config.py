@@ -18,7 +18,7 @@ class BotConfig:
     # Risk management
     base_risk_per_trade: float = 0.04          # 1% of portfolio
     initial_capital: float = 1000.0
-    max_concurrent_trades: int = 1
+    max_concurrent_trades: int = 100
     
     # Technical
     category: str = "linear"
